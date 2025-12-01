@@ -191,16 +191,13 @@ class RAGChatBot:
                 for txt, md in zip(data['documents'], data['metadatas'])
             ]
 
-            # --- KEY CHANGE: Decouple Fetching from Final Display ---
-            # We want to fetch MANY candidates (e.g., 20) to ensure we find the 
-            # "needle in the haystack" (Law 5) amidst the "hay" (Code of Conduct).
             fetch_k = 50 
 
-            # 1. Keyword Search (Fetch 50)
+            # Keyword Search (Fetch 50)
             bm25_retriever = BM25Retriever.from_documents(docs)
             bm25_retriever.k = fetch_k
 
-            # 2. Semantic Search (Fetch 50)
+            # Semantic Search (Fetch 50)
             vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": fetch_k})
 
             # 3. Combine (We now have up to 100 candidates)
@@ -209,31 +206,25 @@ class RAGChatBot:
                 weights=[0.5, 0.5]
             )
             
-            # 4. Rerank (Smart Filter)
-            # FlashRank will read all 100 candidates and pick the 'top_k' (5) 
-            # that actually answer the specific question.
+            # Rerank (Smart Filter)
             if self.reranker:
                 compression_retriever = ContextualCompressionRetriever(
                     base_compressor=self.reranker, 
                     base_retriever=ensemble_retriever
                 )
-                # IMPORTANT: We need to tell the compression retriever 
-                # to only return the top_k best ones after filtering.
-                # (Note: FlashRank wrapper behavior varies, but this ensures the pipeline knows)
                 return compression_retriever
             else:
                 return ensemble_retriever
 
     def query(self, question, top_k=5):
-        # 1. Generate Hypothetical Answer
+        # Generate Hypothetical Answer
         print("Generating HyDE document...")
         hyde_prompt = f"""Given the question '{question}', write a paragraph that would answer it. 
         Do not say you don't know. Just make up a plausible answer using technical keywords."""
         
         hypothetical_answer = self.llm.invoke(hyde_prompt).content
         
-        # 2. Search using the Hypothetical Answer instead of the Question
-        # This aligns the vector space better
+        # Search using the Hypothetical Answer instead of the Question
         combined_query = f"{question} {hypothetical_answer}"
         
         retriever = self._build_hybrid_retriever(top_k=top_k)
