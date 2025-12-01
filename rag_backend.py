@@ -200,7 +200,7 @@ class RAGChatBot:
             # Semantic Search (Fetch 50)
             vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": fetch_k})
 
-            # 3. Combine (We now have up to 100 candidates)
+            # Combine (We now have up to 100 candidates)
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[bm25_retriever, vector_retriever],
                 weights=[0.5, 0.5]
