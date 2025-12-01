@@ -32,6 +32,15 @@ MANIFEST
 *.manifest
 *.spec
 
+# Data
+*.pdf
+chroma_db/
+*.sqlite3
+*.bin
+
+*.DS_Store
+
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
