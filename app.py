@@ -1,9 +1,6 @@
 import streamlit as st
 import os
 import shutil
-
-# Import the class from your other file
-# Make sure rag_backend.py is in the same folder as app.py
 from rag_backend import RAGChatBot
 
 # Configuration
