@@ -1,0 +1,21 @@
+# --- UI Framework ---
+streamlit
+
+# --- LangChain Core & Orchestration ---
+langchain
+langchain-community
+langchain-core
+langchain-text-splitters
+langchain-classic
+
+# --- Vector Database & Model Integrations ---
+langchain-chroma
+langchain-ollama
+chromadb
+
+# --- Document Loading (PDFs) ---
+pymupdf
+
+# --- Advanced Retrieval (Hybrid Search & Reranking) ---
+rank_bm25
+flashrank
