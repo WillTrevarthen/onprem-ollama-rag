@@ -74,7 +74,7 @@ with st.sidebar:
         st.info("No documents found in database.")
 
 # --- Main Chat Area ---
-st.title("🤖 Advanced RAG Assistant")
+st.title("🤖 RAG Assistant")
 
 # Display previous messages
 for message in st.session_state.messages:

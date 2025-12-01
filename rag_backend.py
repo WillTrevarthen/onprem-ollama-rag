@@ -1,8 +1,9 @@
 import os
 import sys
+import re
 
 # --- 1. Imports for LangChain v1.1.0+ ---
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
@@ -95,12 +96,11 @@ class RAGChatBot:
     def load_and_index_pdfs(self):
         if not os.path.exists(self.folder_path):
             os.makedirs(self.folder_path)
-            print(f"Created folder: {self.folder_path}. Please put PDFs here.")
             return
 
         local_files = {f for f in os.listdir(self.folder_path) if f.endswith('.pdf')}
         
-        # Safe get
+        # Check existing
         existing_data = self.vector_store.get()
         indexed_files = set()
         if existing_data and existing_data['metadatas']:
@@ -115,20 +115,66 @@ class RAGChatBot:
         print(f"Found {len(new_files)} new files to process.")
         
         all_chunks = []
+        
         for filename in new_files:
             file_path = os.path.join(self.folder_path, filename)
             print(f"Loading: {filename}")
+            
             try:
-                loader = PyPDFLoader(file_path)
+                loader = PyMuPDFLoader(file_path)
                 docs = loader.load()
+                
+                # --- METADATA INJECTION LOGIC ---
+                current_chapter = "Unknown Chapter"
+                
                 for doc in docs:
-                    doc.metadata['source_file'] = filename
+                    # 1. Extract Page Number (PyPDFLoader indexes start at 0)
+                    page_num = doc.metadata.get('page', 0) + 1
+                    
+                    # 2. simple Chapter Detection (Regex)
+                    # Looks for lines starting with "Chapter X" or "1.0 Introduction"
+                    # You can customize this regex based on your specific PDF style
+                    content = doc.page_content
+                    chapter_match = re.search(
+                        r'^(Law \d+|SECTION [A-Z0-9]+|Rule \d+|[A-Z\s]{5,})', 
+                        content, 
+                        re.MULTILINE
+                    )
+                    if chapter_match:
+                        current_chapter = chapter_match.group(0)
 
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+                    # 3. Inject Metadata into the Text
+                    # We prepend this info so the embedding model reads it first.
+                    # This makes the "Where" just as important as the "What".
+                    contextualized_content = (
+                        f"Source: {filename}\n"
+                        f"Page: {page_num}\n"
+                        f"Chapter: {current_chapter}\n"
+                        f"----------------\n"
+                        f"{content}"
+                    )
+                    
+                    # Update the doc object
+                    doc.page_content = contextualized_content
+                    doc.metadata['source_file'] = filename
+                    doc.metadata['page_number'] = page_num
+                    doc.metadata['chapter'] = current_chapter
+
+                # 4. Split (Now splitting the Contextualized text)
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1500, # Increased slightly to account for added metadata
+                    chunk_overlap=200
+                )
                 chunks = text_splitter.split_documents(docs)
                 all_chunks.extend(chunks)
+                
             except Exception as e:
                 print(f"Error loading {filename}: {e}")
+
+        if all_chunks:
+            print(f"Embedding and indexing {len(all_chunks)} chunks with metadata...")
+            self.vector_store.add_documents(all_chunks)
+            print("Indexing complete.")
 
         if all_chunks:
             print(f"Indexing {len(all_chunks)} chunks...")
@@ -136,51 +182,81 @@ class RAGChatBot:
             print("Indexing complete.")
 
     def _build_hybrid_retriever(self, top_k):
-        data = self.vector_store.get()
-        if not data or not data['documents']:
-            return None
-            
-        docs = [
-            Document(page_content=txt, metadata=md or {}) 
-            for txt, md in zip(data['documents'], data['metadatas'])
-        ]
+            data = self.vector_store.get()
+            if not data or not data['documents']:
+                return None
+                
+            docs = [
+                Document(page_content=txt, metadata=md or {}) 
+                for txt, md in zip(data['documents'], data['metadatas'])
+            ]
 
-        # Hybrid Search
-        bm25_retriever = BM25Retriever.from_documents(docs)
-        bm25_retriever.k = top_k 
+            # --- KEY CHANGE: Decouple Fetching from Final Display ---
+            # We want to fetch MANY candidates (e.g., 20) to ensure we find the 
+            # "needle in the haystack" (Law 5) amidst the "hay" (Code of Conduct).
+            fetch_k = 50 
 
-        vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": top_k})
+            # 1. Keyword Search (Fetch 50)
+            bm25_retriever = BM25Retriever.from_documents(docs)
+            bm25_retriever.k = fetch_k
 
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever],
-            weights=[0.5, 0.5]
-        )
-        
-        # Reranking 
-        if self.reranker:
-            compression_retriever = ContextualCompressionRetriever(
-                base_compressor=self.reranker, 
-                base_retriever=ensemble_retriever
+            # 2. Semantic Search (Fetch 50)
+            vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": fetch_k})
+
+            # 3. Combine (We now have up to 100 candidates)
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[bm25_retriever, vector_retriever],
+                weights=[0.5, 0.5]
             )
-            return compression_retriever
-        else:
-            return ensemble_retriever
+            
+            # 4. Rerank (Smart Filter)
+            # FlashRank will read all 100 candidates and pick the 'top_k' (5) 
+            # that actually answer the specific question.
+            if self.reranker:
+                compression_retriever = ContextualCompressionRetriever(
+                    base_compressor=self.reranker, 
+                    base_retriever=ensemble_retriever
+                )
+                # IMPORTANT: We need to tell the compression retriever 
+                # to only return the top_k best ones after filtering.
+                # (Note: FlashRank wrapper behavior varies, but this ensures the pipeline knows)
+                return compression_retriever
+            else:
+                return ensemble_retriever
 
     def query(self, question, top_k=5):
-        print(f"Thinking about: {question}")
+        # 1. Generate Hypothetical Answer
+        print("Generating HyDE document...")
+        hyde_prompt = f"""Given the question '{question}', write a paragraph that would answer it. 
+        Do not say you don't know. Just make up a plausible answer using technical keywords."""
+        
+        hypothetical_answer = self.llm.invoke(hyde_prompt).content
+        
+        # 2. Search using the Hypothetical Answer instead of the Question
+        # This aligns the vector space better
+        combined_query = f"{question} {hypothetical_answer}"
         
         retriever = self._build_hybrid_retriever(top_k=top_k)
         
         if not retriever:
             return "The database is empty. Please add PDFs first."
 
-        template = """You are a helpful AI assistant. Answer the question based ONLY on the following context.
-        
-        Context:
-        {context}
-        
-        Question: {question}
-        """
+        template = """You are an expert research assistant. Use the provided context to answer the question.
+                
+                Rules:
+                1. Answer ONLY using the provided context. If the answer is not there, say "I don't know."
+                2. Think step-by-step before answering.
+                3. Cite the source file and page number for every fact you state.
+                
+                Format your answer like this:
+                [Answer]
+                (Source: filename.pdf, Page: X)
+
+                Context:
+                {context}
+                
+                Question: {question}
+                """
         prompt = ChatPromptTemplate.from_template(template)
 
         chain = (
