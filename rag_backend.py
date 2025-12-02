@@ -176,45 +176,40 @@ class RAGChatBot:
             self.vector_store.add_documents(all_chunks)
             print("Indexing complete.")
 
-        if all_chunks:
-            print(f"Indexing {len(all_chunks)} chunks...")
-            self.vector_store.add_documents(all_chunks)
-            print("Indexing complete.")
-
     def _build_hybrid_retriever(self, top_k):
-            data = self.vector_store.get()
-            if not data or not data['documents']:
-                return None
-                
-            docs = [
-                Document(page_content=txt, metadata=md or {}) 
-                for txt, md in zip(data['documents'], data['metadatas'])
-            ]
-
-            fetch_k = 50 
-
-            # Keyword Search (Fetch 50)
-            bm25_retriever = BM25Retriever.from_documents(docs)
-            bm25_retriever.k = fetch_k
-
-            # Semantic Search (Fetch 50)
-            vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": fetch_k})
-
-            # Combine (We now have up to 100 candidates)
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever, vector_retriever],
-                weights=[0.5, 0.5]
-            )
+        data = self.vector_store.get()
+        if not data or not data['documents']:
+            return None
             
-            # Rerank (Smart Filter)
-            if self.reranker:
-                compression_retriever = ContextualCompressionRetriever(
-                    base_compressor=self.reranker, 
-                    base_retriever=ensemble_retriever
-                )
-                return compression_retriever
-            else:
-                return ensemble_retriever
+        docs = [
+            Document(page_content=txt, metadata=md or {}) 
+            for txt, md in zip(data['documents'], data['metadatas'])
+        ]
+
+        fetch_k = 50 
+
+        # Keyword Search (Fetch 50)
+        bm25_retriever = BM25Retriever.from_documents(docs)
+        bm25_retriever.k = fetch_k
+
+        # Semantic Search (Fetch 50)
+        vector_retriever = self.vector_store.as_retriever(search_kwargs={"k": fetch_k})
+
+        # Combine (We now have up to 100 candidates)
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, vector_retriever],
+            weights=[0.5, 0.5]
+        )
+        
+        # Rerank (Smart Filter)
+        if self.reranker:
+            compression_retriever = ContextualCompressionRetriever(
+                base_compressor=self.reranker, 
+                base_retriever=ensemble_retriever
+            )
+            return compression_retriever
+        else:
+            return ensemble_retriever
 
     def query(self, question, top_k=5):
         # Generate Hypothetical Answer
@@ -258,6 +253,66 @@ class RAGChatBot:
         )
 
         return chain.invoke(question)
+    
+    def hyde_query(self, question, top_k=5):
+        # Generate Hypothetical Answer (HyDE)
+        print("Generating HyDE document...")
+        hyde_prompt = f"""Given the question '{question}', write a paragraph that would answer it. 
+        Do not say you don't know. Just make up a plausible answer using technical keywords."""
+        
+        # Get the hallucinated answer
+        hypothetical_answer = self.llm.invoke(hyde_prompt).content
+        
+        # Combine user question + hallucination for a better search query
+        combined_query = f"{question} {hypothetical_answer}"
+        print(f"Searching with enhanced query: {combined_query[:100]}...") # Debug print
+        
+        # Build the Retriever
+        retriever = self._build_hybrid_retriever(top_k=top_k)
+        if not retriever:
+            return "The database is empty. Please add PDFs first."
+
+        # We explicitly pass the 'combined_query' here to find better docs
+        retrieved_docs = retriever.invoke(combined_query)
+        
+        # Helper to join docs into a string
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+        
+        context_text = format_docs(retrieved_docs)
+
+        # Generate Answer (Using Original Question)
+        # We now pass the manually retrieved context into the prompt
+        template = """You are an expert research assistant. Use the provided context to answer the question.
+                
+                Rules:
+                1. Answer ONLY using the provided context. If the answer is not there, say "I don't know."
+                2. Think step-by-step before answering.
+                3. Cite the source file and page number for every fact you state.
+                
+                Format your answer like this:
+                [Answer]
+                (Source: filename.pdf, Page: X)
+
+                Context:
+                {context}
+                
+                Question: {question}
+                """
+        
+        prompt = ChatPromptTemplate.from_template(template)
+
+        # Note: We removed the retriever from this chain because we already ran it above
+        chain = (
+            prompt
+            | self.llm
+            | StrOutputParser()
+        )
+
+        # We pass the dictionary explicitly: 
+        # 'context' gets the HyDE-retrieved text
+        # 'question' gets the user's original question
+        return chain.stream({"context": context_text, "question": question})
 
 if __name__ == "__main__":
     # Standard terminal usage test
