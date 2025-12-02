@@ -134,7 +134,8 @@ class RAGChatBot:
                     # 2. simple Chapter Detection (Regex)
                     # Looks for lines starting with "Chapter X" or "1.0 Introduction"
                     # You can customize this regex based on your specific PDF style
-                    content = doc.page_content
+                    raw_content = doc.page_content
+                    content = re.sub(r'\s+', ' ', raw_content).strip()
                     chapter_match = re.search(
                         r'^(Law \d+|SECTION [A-Z0-9]+|Rule \d+|[A-Z\s]{5,})', 
                         content, 
@@ -147,11 +148,9 @@ class RAGChatBot:
                     # We prepend this info so the embedding model reads it first.
                     # This makes the "Where" just as important as the "What".
                     contextualized_content = (
-                        f"Source: {filename}\n"
-                        f"Page: {page_num}\n"
-                        f"Chapter: {current_chapter}\n"
-                        f"----------------\n"
-                        f"{content}"
+                        f"{content}\n\n"
+                        f"--- Metadata ---\n"
+                        f"Source: {filename} | Page: {page_num} | Chapter: {current_chapter}"
                     )
                     
                     # Update the doc object
@@ -203,6 +202,7 @@ class RAGChatBot:
         
         # Rerank (Smart Filter)
         if self.reranker:
+            self.reranker.top_n = top_k
             compression_retriever = ContextualCompressionRetriever(
                 base_compressor=self.reranker, 
                 base_retriever=ensemble_retriever
@@ -212,16 +212,6 @@ class RAGChatBot:
             return ensemble_retriever
 
     def query(self, question, top_k=5):
-        # Generate Hypothetical Answer
-        print("Generating HyDE document...")
-        hyde_prompt = f"""Given the question '{question}', write a paragraph that would answer it. 
-        Do not say you don't know. Just make up a plausible answer using technical keywords."""
-        
-        hypothetical_answer = self.llm.invoke(hyde_prompt).content
-        
-        # Search using the Hypothetical Answer instead of the Question
-        combined_query = f"{question} {hypothetical_answer}"
-        
         retriever = self._build_hybrid_retriever(top_k=top_k)
         
         if not retriever:
@@ -312,11 +302,25 @@ class RAGChatBot:
         # We pass the dictionary explicitly: 
         # 'context' gets the HyDE-retrieved text
         # 'question' gets the user's original question
-        return chain.stream({"context": context_text, "question": question})
+        return chain.invoke({"context": context_text, "question": question})
+
+    def debug_retrieval(self, question):
+        print(f"\n--- Debugging: {question} ---")
+        # Get the raw retriever without the chain
+        retriever = self._build_hybrid_retriever(top_k=5)
+        docs = retriever.invoke(question)
+        
+        if not docs:
+            print("No documents found.")
+        
+        for i, doc in enumerate(docs):
+            print(f"\n[Doc {i+1}] Source: {doc.metadata.get('source_file')}")
+            # Print first 200 chars to see if it's relevant
+            print(f"Content snippet: {doc.page_content[:200]}...")
 
 if __name__ == "__main__":
     # Standard terminal usage test
-    bot = RAGChatBot(folder_path="pdfs")
+    bot = RAGChatBot(folder_path="test_pdfs")
     bot.load_and_index_pdfs()
     
     print("\nSystem Ready. Type 'exit' to quit.")
@@ -324,4 +328,5 @@ if __name__ == "__main__":
         query = input("\nQuery: ")
         if query.lower() == 'exit':
             break
-        print("\n" + bot.query(query) + "\n")
+        print("\n" + bot.hyde_query(query) + "\n")
+        bot.debug_retrieval(query)
